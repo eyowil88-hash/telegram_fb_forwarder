@@ -1,3 +1,1 @@
-telethon
-requests
-python-dotenv
+worker: python main.py
