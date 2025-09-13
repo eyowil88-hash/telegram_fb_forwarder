@@ -1,6 +1,5 @@
 # main.py
 # Telegram -> Facebook forwarder (photos + text) using StringSession + Flask (for Render)
-# Keep this file private (contains sensitive credentials)
 
 import os
 import time
@@ -33,8 +32,160 @@ client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
 
 def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
-    """Post to FB with retries and exponential backoff. Returns response or None."""
+    """Post to FB with retries and exponential backoff. Returns response JSON or None."""
     for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=timeout)
+            if resp.status_code == 200:
+                print(f"✅ Success on attempt {attempt}")
+                return resp.json()
+            else:
+                print(f"⚠️ Error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"❌ Exception on attempt {attempt}: {e}")
+
+        sleep_time = 2 ** attempt
+        print(f"⏳ Retrying in {sleep_time} seconds...")
+        time.sleep(sleep_time)
+    print("🚨 All retries failed.")
+    return None
+
+
+# ==== TELEGRAM EVENT HANDLER ====
+@client.on(events.NewMessage(chats=target_chat_ids))
+async def handler(event):
+    """Forward Telegram messages (photos + caption or text) to Facebook Page."""
+    try:
+        msg = event.message
+        message_text = (getattr(msg, "message", None) or getattr(event, "raw_text", "") or "").strip()
+        print(f"📩 New message (chat_id={event.chat_id}): {message_text}")
+
+        # === Case A: Handle albums (multi-photo carousel) ===
+        if event.grouped_id:
+            print("🖼 Album detected — downloading photos...")
+            grouped_msgs = await client.get_messages(
+                event.chat_id,
+                min_id=event.id - 20,
+                max_id=event.id + 20
+            )
+
+            photos = []
+            for m in grouped_msgs:
+                if m.grouped_id == event.grouped_id and getattr(m, "photo", None):
+                    file_path = await m.download_media()
+                    if file_path:
+                        photos.append(file_path)
+
+            if not photos:
+                print("⚠️ No photos found in album.")
+                return
+
+            print(f"📂 Downloaded {len(photos)} photos. Uploading to Facebook...")
+
+            media_ids = []
+            for i, photo_path in enumerate(photos, start=1):
+                url = f"https://graph.facebook.com/{page_id}/photos"
+                with open(photo_path, "rb") as f:
+                    files = {"source": f}
+                    data = {
+                        "published": "false",  # don't publish immediately
+                        "access_token": page_access_token
+                    }
+                    resp = post_with_retry(url, data=data, files=files)
+                try:
+                    os.remove(photo_path)
+                except:
+                    pass
+
+                if resp and "id" in resp:
+                    media_ids.append(resp["id"])
+                    print(f"📤 Uploaded photo {i}/{len(photos)} (id={resp['id']})")
+                else:
+                    print(f"❌ Failed to upload photo {i}")
+
+            if not media_ids:
+                print("⚠️ No media IDs collected, aborting album post.")
+                return
+
+            # Now publish carousel post
+            url = f"https://graph.facebook.com/{page_id}/feed"
+            data = {
+                "message": message_text,
+                "access_token": page_access_token
+            }
+            for i, mid in enumerate(media_ids):
+                data[f"attached_media[{i}]"] = f'{{"media_fbid":"{mid}"}}'
+
+            resp = post_with_retry(url, data=data)
+            if resp and "id" in resp:
+                print(f"✅ Album posted successfully (post_id={resp['id']})")
+            else:
+                print("❌ Failed to create album post.")
+            return
+
+        # === Case B: Single photo ===
+        if getattr(msg, "photo", None):
+            print("🖼 Single photo detected — downloading...")
+            file_path = await msg.download_media()
+            if not file_path:
+                print("⚠️ Failed to download photo.")
+                return
+
+            url = f"https://graph.facebook.com/{page_id}/photos"
+            with open(file_path, "rb") as f:
+                files = {"source": f}
+                data = {"caption": message_text, "access_token": page_access_token}
+                resp = post_with_retry(url, data=data, files=files)
+            try:
+                os.remove(file_path)
+            except:
+                pass
+
+            if resp:
+                print("📤 Single photo forwarded to Facebook.")
+            else:
+                print("❌ Single photo forwarding failed.")
+            return
+
+        # === Case C: Text-only ===
+        if message_text:
+            url = f"https://graph.facebook.com/{page_id}/feed"
+            data = {"message": message_text, "access_token": page_access_token}
+            resp = post_with_retry(url, data=data)
+            if resp:
+                print("📤 Text forwarded to Facebook.")
+            else:
+                print("❌ Text forwarding failed.")
+            return
+
+        print("ℹ️ Message ignored (no text, no photo).")
+
+    except Exception as ex:
+        print("Handler exception:", ex)
+
+
+# ==== RUN TELEGRAM FORWARDER ====
+def run_forwarder():
+    try:
+        print("🚀 Forwarder starting...")
+        client.start()
+        client.run_until_disconnected()
+    except Exception as e:
+        print("Forwarder crashed:", e)
+
+
+# ==== FLASK (keep Render alive) ====
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Telegram → Facebook forwarder is running."
+
+if __name__ == "__main__":
+    threading.Thread(target=run_forwarder, daemon=True).start()
+    port = int(os.environ.get("PORT", "10000"))
+    print(f"🌐 Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port)    for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(url, data=data, files=files, timeout=timeout)
             if resp.status_code == 200:
