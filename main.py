@@ -3,8 +3,8 @@ from telethon.sessions import StringSession
 import requests
 import os
 import time
-from flask import Flask
 import threading
+from flask import Flask
 
 # ==== TELEGRAM CONFIG ====
 api_id = 20897579
@@ -25,16 +25,107 @@ target_chat_ids = [
 # ==== Create Telegram client ====
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
+
 # ==== Retry helper ====
-def post_with_retry(url, payload=None, files=None, max_retries=3):
+def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.post(url, data=payload, files=files, timeout=30)
-            if response.status_code == 200:
+            resp = requests.post(url, data=data, files=files, timeout=timeout)
+            if resp.status_code == 200:
                 print(f"✅ Success on attempt {attempt}")
-                return response
+                return resp
             else:
-                print(f"⚠️ Error {response.status_code}: {response.text}")
+                print(f"⚠️ Error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"❌ Exception on attempt {attempt}: {e}")
+
+        # exponential backoff
+        sleep_time = 2 ** attempt
+        print(f"⏳ Retrying in {sleep_time} seconds...")
+        time.sleep(sleep_time)
+
+    print("🚨 All retries failed.")
+    return None
+
+
+# ==== Telegram Event Handler ====
+@client.on(events.NewMessage(chats=target_chat_ids))
+async def handler(event):
+    msg = event.message
+    message_text = getattr(msg, "message", "") or getattr(event, "raw_text", "") or ""
+    print(f"📩 New Telegram message (chat {event.chat_id}): {message_text}")
+
+    try:
+        # Case 1: Photos
+        if getattr(msg, "photo", None):
+            print("🖼 Photo detected — downloading...")
+            file_path = await msg.download_media()
+            if not file_path:
+                print("⚠️ Failed to download media.")
+                return
+
+            print(f"📂 Downloaded to {file_path}")
+            url = f"https://graph.facebook.com/{page_id}/photos"
+            with open(file_path, "rb") as f:
+                files = {"source": f}
+                data = {"caption": message_text, "access_token": page_access_token}
+                resp = post_with_retry(url, data=data, files=files)
+
+            # cleanup
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                print(f"⚠️ Could not delete file: {e}")
+
+            if resp:
+                print("📤 Photo forwarded to Facebook.")
+            else:
+                print("❌ Photo forwarding failed.")
+            return
+
+        # Case 2: Text only
+        if message_text.strip():
+            url = f"https://graph.facebook.com/{page_id}/feed"
+            data = {"message": message_text, "access_token": page_access_token}
+            resp = post_with_retry(url, data=data)
+            if resp:
+                print("📤 Text forwarded to Facebook.")
+            else:
+                print("❌ Text forwarding failed.")
+            return
+
+        print("ℹ️ Ignored message (no text, no photo).")
+
+    except Exception as ex:
+        print(f"Handler exception: {ex}")
+
+
+# ==== Run Telegram Forwarder ====
+def run_forwarder():
+    try:
+        print("🚀 Starting Telegram forwarder...")
+        client.start()
+        client.run_until_disconnected()
+    except Exception as e:
+        print(f"❌ Forwarder crashed: {e}")
+
+
+# ==== Flask app to keep Render alive ====
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Telegram → Facebook forwarder is running."
+
+
+if __name__ == "__main__":
+    # Run Telegram in background thread
+    threading.Thread(target=run_forwarder, daemon=True).start()
+
+    # Start Flask in main thread (Render expects a web server)
+    port = int(os.environ.get("PORT", "10000"))
+    print(f"🌐 Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port)                print(f"⚠️ Error {response.status_code}: {response.text}")
         except Exception as e:
             print(f"❌ Exception on attempt {attempt}: {e}")
 
