@@ -58,3 +58,16 @@ async def handler(event):
 print("🚀 Forwarder is running... Waiting for Telegram messages.")
 client.start()
 client.run_until_disconnected()
+
+# === Flask dummy app (to keep Render alive) ===
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Bot is running!"
+
+if __name__ == "__main__":
+    # Run the forwarder in a background thread
+    threading.Thread(target=run_forwarder, daemon=True).start()
+    # Start Flask server
+    app.run(host="0.0.0.0", port=10000)
