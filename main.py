@@ -1,40 +1,106 @@
-# main.py
-# Telegram -> Facebook forwarder (photos + text) using StringSession + Flask (for Render)
-
-import os
-import time
-import threading
-import requests
-from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+import requests
+import os
+import time
+from flask import Flask
+import threading
 
 # ==== TELEGRAM CONFIG ====
 api_id = 20897579
 api_hash = "73dfd54a9aada23f038a3df5bee759b6"
-
-# <<< Your StringSession (keep secret) >>>
 string_session = "1BJWap1wBu2WhV2HnlvqNraL2LY5Zn6wMo9sajMhsdLE8h26qxLveSA4SvjnorxKrNXDKvJLOqWBaCtfHUrqJiVzpZpTSweisQWXe7wpOcI5nsuMkLIEp3_uxlqQ3GIhthwl_PqLbjMnGm1px2wa8qWWXQAcMfkjPQumnVP6TwhIRc2d79bYsLv5uD4o0Mzg7hgJR6ZIgsjZZqBIz5cavAxzIQf7YQiurJxvXyHEWdCbn2FrjqEACYJYiUbRv5c1U_Yeg5_6fyg5vUxul_PQfcNk9I6rSXb7RSLCheKG4owsWq_X7CU3gN-DNJHIT615J9k2rKyxtrZFLbBxvx9ywZEhjU_KgiB8="
 
 # ==== FACEBOOK CONFIG ====
-page_id = "825222120665959"  # Your Page ID
+page_id = "825222120665959"
 page_access_token = "EAASGKwtJZAogBPVTXcyUZAmZAKNS7XPO2uBZAw8d2NrVpiBBVzrdMTYuchOhjPjRGdklwBtv6jyT8F1Vw9ZCegHZADujQdWlhPUvFd9BCZCZAmAZBRubLfFkUHDaHZA138pwtlU59JU6PQW7EU4Ghwn4cEJBTnhH3hx8sUGm7F46KKpFG1bdrscuw8QPK0xUPzZAxRq3ZBv8"
 
-# ==== TARGET TELEGRAM CHAT IDS ====
+# ==== TARGET GROUP CHAT IDS ====
 target_chat_ids = [
     -1002246802603,   # •NIA•💎PRIVATE CLUB💎•channel•
     -1001478882874,   # All Nigeria Latest News
     -1002196614972    # 💸Trade with Nia💸
 ]
 
-# ==== TELEGRAM CLIENT (StringSession) ====
+# Init Telegram client with StringSession
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
 
-def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
-    """Post to FB with retries and exponential backoff. Returns response JSON or None."""
+# ==== Retry helper ====
+def post_with_retry(url, payload=None, files=None, max_retries=3):
     for attempt in range(1, max_retries + 1):
         try:
+            response = requests.post(url, data=payload, files=files, timeout=30)
+            if response.status_code == 200:
+                print(f"✅ Success on attempt {attempt}")
+                return response
+            else:
+                print(f"⚠️ Error {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"❌ Exception on attempt {attempt}: {e}")
+
+        sleep_time = 2 ** attempt
+        print(f"⏳ Retrying in {sleep_time} seconds...")
+        time.sleep(sleep_time)
+
+    print("🚨 All retries failed.")
+    return None
+
+
+# ==== Telegram Event Handler ====
+@client.on(events.NewMessage(chats=target_chat_ids))
+async def handler(event):
+    message_text = event.message.message or ""
+    print(f"📩 New message: {message_text}")
+
+    # Case 1: Handle photos
+    if event.message.photo:
+        file_path = await event.message.download_media()
+        print(f"📂 Downloaded photo: {file_path}")
+
+        url = f"https://graph.facebook.com/{page_id}/photos"
+        files = {"source": open(file_path, "rb")}
+        payload = {
+            "caption": message_text,
+            "access_token": page_access_token,
+        }
+
+        response = post_with_retry(url, payload=payload, files=files)
+        print(f"📤 FB Photo Final Response: {response.status_code if response else 'FAILED'}")
+
+        os.remove(file_path)
+
+    # Case 2: Handle text-only messages
+    elif message_text.strip():
+        url = f"https://graph.facebook.com/{page_id}/feed"
+        payload = {
+            "message": message_text,
+            "access_token": page_access_token,
+        }
+
+        response = post_with_retry(url, payload=payload)
+        print(f"📤 FB Text Final Response: {response.status_code if response else 'FAILED'}")
+
+
+# ==== Flask tiny web server (for Render) ====
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Telegram → Facebook forwarder is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+# Start Flask in a separate thread
+threading.Thread(target=run_flask).start()
+
+
+# ==== Start Telegram client ====
+print("🚀 Forwarder is running with retry logic... Waiting for messages.")
+client.start()
+client.run_until_disconnected()        try:
             resp = requests.post(url, data=data, files=files, timeout=timeout)
             if resp.status_code == 200:
                 print(f"✅ Success on attempt {attempt}")
