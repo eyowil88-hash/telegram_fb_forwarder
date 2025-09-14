@@ -149,11 +149,15 @@ async def handler(event):
 
 def run_telegram_client():
     try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         print("🚀 Starting Telegram client...")
-        client.start()
-        print("✅ Telegram client started successfully")
-        print("🤖 Bot is now running and listening for messages...")
-        client.run_until_disconnected()
+        with client:
+            print("✅ Telegram client started successfully")
+            print("🤖 Bot is now running and listening for messages...")
+            client.run_until_disconnected()
     except Exception as e:
         print(f"❌ Telegram client crashed: {e}")
 
@@ -168,9 +172,10 @@ def health():
     return "OK", 200
 
 if __name__ == "__main__":
+    # Start Telegram client in a separate thread with proper event loop
     telegram_thread = Thread(target=run_telegram_client, daemon=True)
     telegram_thread.start()
     
     port = int(os.environ.get("PORT", 10000))
     print(f"🌐 Starting Flask server on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
