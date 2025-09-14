@@ -1,19 +1,38 @@
+import os
+import time
+import asyncio
+import aiohttp
+from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import requests
-import os
-import time
-import threading
-from flask import Flask
+import tempfile
 
-# ==== TELEGRAM CONFIG ====
-api_id = 20897579
-api_hash = "73dfd54a9aada23f038a3df5bee759b6"
-string_session = "1BJWap1wBu2WhV2HnlvqNraL2LY5Zn6wMo9sajMhsdLE8h26qxLveSA4SvjnorxKrNXDKvJLOqWBaCtfHUrqJiVzpZpTSweisQWXe7wpOcI5nsuMkLIEp3_uxlqQ3GIhthwl_PqLbjMnGm1px2wa8qWWXQAcMfkjPQumnVP6TwhIRc2d79bYsLv5uD4o0Mzg7hgJR6ZIgsjZZqBIz5cavAxzIQf7YQiurJxvXyHEWdCbn2FrjqEACYJYiUbRv5c1U_Yeg5_6fyg5vUxul_PQfcNk9I6rSXb7RSLCheKG4owsWq_X7CU3gN-DNJHIT615J9k2rKyxtrZFLbBxvx9ywZEhjU_KgiB8="
+# ==== Load configuration from environment variables ====
+api_id = os.environ.get('API_ID')
+api_hash = os.environ.get('API_HASH')
+string_session = os.environ.get('STRING_SESSION')
+page_id = os.environ.get('PAGE_ID')
+page_access_token = os.environ.get('PAGE_ACCESS_TOKEN')
 
-# ==== FACEBOOK CONFIG ====
-page_id = "825222120665959"
-page_access_token = "EAASGKwtJZAogBPVTXcyUZAmZAKNS7XPO2uBZAw8d2NrVpiBBVzrdMTYuchOhjPjRGdklwBtv6jyT8F1Vw9ZCegHZADujQdWlhPUvFd9BCZCZAmAZBRubLfFkUHDaHZA138pwtlU59JU6PQW7EU4Ghwn4cEJBTnhH3hx8sUGm7F46KKpFG1bdrscuw8QPK0xUPzZAxRq3ZBv8"
+# Validate required environment variables
+required_vars = {
+    'API_ID': api_id,
+    'API_HASH': api_hash,
+    'STRING_SESSION': string_session,
+    'PAGE_ID': page_id,
+    'PAGE_ACCESS_TOKEN': page_access_token
+}
+
+missing_vars = [var for var, value in required_vars.items() if not value]
+if missing_vars:
+    raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+
+# Convert to integer if needed
+try:
+    api_id = int(api_id)
+except (ValueError, TypeError):
+    raise ValueError("API_ID must be an integer")
 
 # ==== TARGET TELEGRAM CHAT IDS ====
 target_chat_ids = [
@@ -25,16 +44,155 @@ target_chat_ids = [
 # ==== Create Telegram client ====
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
+# Rate limiting variables
+last_post_time = 0
+MIN_POST_INTERVAL = 2  # seconds between posts to avoid rate limiting
 
 # ==== Retry helper ====
-def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
+async def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.post(url, data=data, files=files, timeout=timeout)
-            if resp.status_code == 200:
-                print(f"✅ Success on attempt {attempt}")
-                return resp
+            if files:
+                # For file uploads, use requests as aiohttp form data is more complex
+                resp = requests.post(url, data=data, files=files, timeout=timeout)
             else:
+                # For regular posts, use aiohttp for async operation
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, data=data, timeout=timeout) as resp:
+                        response_text = await resp.text()
+                        status_code = resp.status
+            
+            if status_code == 200:
+                print(f"✅ Success on attempt {attempt}")
+                # Check for Facebook API errors even with 200 status
+                try:
+                    response_json = resp.json() if files else json.loads(response_text)
+                    if "error" in response_json:
+                        print(f"❌ Facebook API error: {response_json['error']['message']}")
+                        return None
+                except:
+                    pass
+                return resp if files else response_text
+            else:
+                error_msg = resp.text if files else response_text
+                print(f"⚠️ Error {status_code}: {error_msg}")
+        except Exception as e:
+            print(f"❌ Exception on attempt {attempt}: {e}")
+
+        # Exponential backoff
+        sleep_time = 2 ** attempt
+        print(f"⏳ Retrying in {sleep_time} seconds...")
+        await asyncio.sleep(sleep_time)
+
+    print("🚨 All retries failed.")
+    return None
+
+# ==== Telegram Event Handler ====
+@client.on(events.NewMessage(chats=target_chat_ids))
+async def handler(event):
+    global last_post_time
+    
+    msg = event.message
+    message_text = getattr(msg, "message", "") or getattr(event, "raw_text", "") or ""
+    print(f"📩 New Telegram message (chat {event.chat_id}): {message_text}")
+
+    # Rate limiting
+    current_time = time.time()
+    if current_time - last_post_time < MIN_POST_INTERVAL:
+        wait_time = MIN_POST_INTERVAL - (current_time - last_post_time)
+        print(f"⏳ Rate limiting: waiting {wait_time:.2f} seconds")
+        await asyncio.sleep(wait_time)
+    
+    last_post_time = time.time()
+
+    try:
+        # Case 1: Photos
+        if getattr(msg, "photo", None):
+            print("🖼 Photo detected — downloading...")
+            # Create a temporary directory for the download
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                try:
+                    file_path = await msg.download_media(file=os.path.join(tmp_dir, "photo"))
+                    if not file_path:
+                        print("⚠️ Failed to download media.")
+                        return
+
+                    print(f"📂 Downloaded to {file_path}")
+                    url = f"https://graph.facebook.com/{page_id}/photos"
+                    
+                    # Use requests for file uploads (simpler than aiohttp for form data)
+                    with open(file_path, "rb") as f:
+                        files = {"source": f}
+                        data = {"caption": message_text, "access_token": page_access_token}
+                        resp = await asyncio.get_event_loop().run_in_executor(
+                            None, 
+                            lambda: requests.post(url, data=data, files=files, timeout=30)
+                        )
+                    
+                    if resp and resp.status_code == 200:
+                        # Check for Facebook API errors
+                        fb_response = resp.json()
+                        if "error" in fb_response:
+                            print(f"❌ Facebook API error: {fb_response['error']['message']}")
+                        else:
+                            print("📤 Photo forwarded to Facebook.")
+                    else:
+                        print("❌ Photo forwarding failed.")
+                        
+                except Exception as download_error:
+                    print(f"❌ Failed to process media: {download_error}")
+                    return
+
+        # Case 2: Text only
+        elif message_text.strip():
+            url = f"https://graph.facebook.com/{page_id}/feed"
+            data = {"message": message_text, "access_token": page_access_token}
+            resp = await post_with_retry(url, data=data)
+            if resp:
+                print("📤 Text forwarded to Facebook.")
+            else:
+                print("❌ Text forwarding failed.")
+                
+        else:
+            print("ℹ️ Ignored message (no text, no photo).")
+
+    except Exception as ex:
+        print(f"Handler exception: {ex}")
+
+# ==== Run Telegram Forwarder ====
+async def run_telegram_client():
+    try:
+        print("🚀 Starting Telegram client...")
+        await client.start()
+        print("✅ Telegram client started successfully")
+        await client.run_until_disconnected()
+    except Exception as e:
+        print(f"❌ Telegram client crashed: {e}")
+
+# ==== Web server to keep service alive ====
+async def handle(request):
+    return web.Response(text="✅ Telegram → Facebook forwarder is running.")
+
+async def start_background_tasks(app):
+    # Start Telegram client as a background task
+    app['telegram_task'] = asyncio.create_task(run_telegram_client())
+
+async def cleanup_background_tasks(app):
+    # Cleanup Telegram client task
+    app['telegram_task'].cancel()
+    await app['telegram_task']
+
+# Create web application
+app = web.Application()
+app.router.add_get('/', handle)
+app.on_startup.append(start_background_tasks)
+app.on_cleanup.append(cleanup_background_tasks)
+
+if __name__ == "__main__":
+    # Get port from environment variable (for Render/Heroku) or default to 10000
+    port = int(os.environ.get("PORT", "10000"))
+    print(f"🌐 Starting web server on port {port}")
+    web.run_app(app, host="0.0.0.0", port=port)            else:
                 print(f"⚠️ Error {resp.status_code}: {resp.text}")
         except Exception as e:
             print(f"❌ Exception on attempt {attempt}: {e}")
