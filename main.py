@@ -3,11 +3,13 @@ import time
 import asyncio
 import requests
 import json
+from flask import Flask
+from threading import Thread
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import tempfile
 
-print("🔧 Starting Telegram to Facebook forwarder...")
+print("🔧 Starting Telegram to Facebook forwarder as Web Service...")
 
 # Load configuration from environment variables
 api_id = os.environ.get('API_ID')
@@ -145,16 +147,46 @@ async def handler(event):
     except Exception as ex:
         print(f"Handler exception: {ex}")
 
-async def main():
+def run_telegram_client():
     try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         print("🚀 Starting Telegram client...")
-        await client.start()
-        print("✅ Telegram client started successfully")
-        print("🤖 Bot is now running and listening for messages...")
-        print("🌐 Service is running without web server (Render will keep it alive)")
-        await client.run_until_disconnected()
+        with client:
+            print("✅ Telegram client started successfully")
+            print("🤖 Bot is now running and listening for messages...")
+            client.run_until_disconnected()
     except Exception as e:
         print(f"❌ Telegram client crashed: {e}")
 
+# Create Flask app
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Telegram → Facebook forwarder is running."
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/status')
+def status():
+    return {
+        "status": "running",
+        "service": "Telegram to Facebook Forwarder",
+        "telegram": "connected" if client.is_connected() else "disconnected"
+    }
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Start Telegram client in a separate thread
+    telegram_thread = Thread(target=run_telegram_client, daemon=True)
+    telegram_thread.start()
+    
+    # Start Flask server in main thread (this is what Render expects)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask server on port {port}")
+    print(f"🔗 Web service will be available at: https://telegram-fb-forwarder.onrender.com")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
