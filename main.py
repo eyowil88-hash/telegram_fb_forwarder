@@ -188,6 +188,160 @@ if __name__ == "__main__":
     # Start Flask server
     port = int(os.environ.get("PORT", 10000))
     print(f"🌐 Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)try:
+    api_id = int(api_id)
+except (ValueError, TypeError):
+    error_msg = "API_ID must be an integer"
+    print(f"❌ {error_msg}")
+    raise ValueError(error_msg)
+
+print("✅ Environment variables loaded successfully")
+
+# ==== TARGET TELEGRAM CHAT IDS ====
+target_chat_ids = [
+    -1002246802603,   # •NIA•💎PRIVATE CLUB💎•channel•
+    -1001478882874,   # All Nigeria Latest News
+    -1002196614972    # 💸Trade with Nia💸
+]
+
+# ==== Create Telegram client ====
+client = TelegramClient(StringSession(string_session), api_id, api_hash)
+
+# Rate limiting variables
+last_post_time = 0
+MIN_POST_INTERVAL = 2  # seconds between posts to avoid rate limiting
+
+# ==== Retry helper ====
+def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
+    for attempt in range(1, max_retries + 1):
+        try:
+            if files:
+                resp = requests.post(url, data=data, files=files, timeout=timeout)
+            else:
+                resp = requests.post(url, data=data, timeout=timeout)
+            
+            if resp.status_code == 200:
+                print(f"✅ Success on attempt {attempt}")
+                # Check for Facebook API errors even with 200 status
+                try:
+                    response_json = resp.json()
+                    if "error" in response_json:
+                        print(f"❌ Facebook API error: {response_json['error']['message']}")
+                        return None
+                except:
+                    pass
+                return resp
+            else:
+                print(f"⚠️ Error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"❌ Exception on attempt {attempt}: {e}")
+
+        # Exponential backoff
+        sleep_time = 2 ** attempt
+        print(f"⏳ Retrying in {sleep_time} seconds...")
+        time.sleep(sleep_time)
+
+    print("🚨 All retries failed.")
+    return None
+
+# ==== Telegram Event Handler ====
+@client.on(events.NewMessage(chats=target_chat_ids))
+async def handler(event):
+    global last_post_time
+    
+    msg = event.message
+    message_text = getattr(msg, "message", "") or getattr(event, "raw_text", "") or ""
+    print(f"📩 New Telegram message (chat {event.chat_id}): {message_text}")
+
+    # Rate limiting
+    current_time = time.time()
+    if current_time - last_post_time < MIN_POST_INTERVAL:
+        wait_time = MIN_POST_INTERVAL - (current_time - last_post_time)
+        print(f"⏳ Rate limiting: waiting {wait_time:.2f} seconds")
+        await asyncio.sleep(wait_time)
+    
+    last_post_time = time.time()
+
+    try:
+        # Case 1: Photos
+        if getattr(msg, "photo", None):
+            print("🖼 Photo detected — downloading...")
+            # Create a temporary directory for the download
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                try:
+                    file_path = await msg.download_media(file=os.path.join(tmp_dir, "photo"))
+                    if not file_path:
+                        print("⚠️ Failed to download media.")
+                        return
+
+                    print(f"📂 Downloaded to {file_path}")
+                    url = f"https://graph.facebook.com/{page_id}/photos"
+                    
+                    # Use requests for file uploads
+                    with open(file_path, "rb") as f:
+                        files = {"source": f}
+                        data = {"caption": message_text, "access_token": page_access_token}
+                        resp = post_with_retry(url, data=data, files=files)
+                    
+                    if resp and resp.status_code == 200:
+                        # Check for Facebook API errors
+                        fb_response = resp.json()
+                        if "error" in fb_response:
+                            print(f"❌ Facebook API error: {fb_response['error']['message']}")
+                        else:
+                            print("📤 Photo forwarded to Facebook.")
+                    else:
+                        print("❌ Photo forwarding failed.")
+                        
+                except Exception as download_error:
+                    print(f"❌ Failed to process media: {download_error}")
+
+        # Case 2: Text only
+        elif message_text.strip():
+            url = f"https://graph.facebook.com/{page_id}/feed"
+            data = {"message": message_text, "access_token": page_access_token}
+            resp = post_with_retry(url, data=data)
+            if resp:
+                print("📤 Text forwarded to Facebook.")
+            else:
+                print("❌ Text forwarding failed.")
+                
+        else:
+            print("ℹ️ Ignored message (no text, no photo).")
+
+    except Exception as ex:
+        print(f"Handler exception: {ex}")
+
+# ==== Run Telegram Forwarder ====
+def run_telegram_client():
+    try:
+        print("🚀 Starting Telegram client...")
+        client.start()
+        print("✅ Telegram client started successfully")
+        print("🤖 Bot is now running and listening for messages...")
+        client.run_until_disconnected()
+    except Exception as e:
+        print(f"❌ Telegram client crashed: {e}")
+
+# ==== Flask web server to keep service alive ====
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Telegram → Facebook forwarder is running."
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+if __name__ == "__main__":
+    # Start Telegram client in a separate thread
+    telegram_thread = Thread(target=run_telegram_client, daemon=True)
+    telegram_thread.start()
+    
+    # Start Flask server
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask server on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)path, "rb") as f:
                         files = {"source": f}
                         data = {"caption": message_text, "access_token": page_access_token}
