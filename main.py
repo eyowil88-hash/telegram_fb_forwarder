@@ -166,4 +166,80 @@ async def handler(event):
             print("📝 Text message detected")
             url = f"https://graph.facebook.com/{page_id}/feed"
             data = {"message": message_text, "access_token": page_access_token}
-            resp = post_with_retry(url
+            resp = post_with_retry(url, data=data)
+            if resp and resp.status_code == 200:
+                print("✅ Text forwarded to Facebook.")
+            else:
+                print("❌ Text forwarding failed.")
+                
+        else:
+            print("ℹ️ Ignored message (no processable content).")
+
+    except Exception as ex:
+        print(f"❌ Handler exception: {ex}")
+
+def run_telegram_client():
+    try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        print("🚀 Starting Telegram client...")
+        with client:
+            print("✅ Telegram client started successfully")
+            print("🤖 Bot is now running and listening for messages...")
+            print("📡 Supported media: text, photos, stickers")
+            client.run_until_disconnected()
+    except Exception as e:
+        print(f"❌ Telegram client crashed: {e}")
+
+# Create Flask app
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Telegram → Facebook forwarder is running."
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/status')
+def status():
+    return {
+        "status": "running",
+        "service": "Telegram to Facebook Forwarder",
+        "telegram_connected": client.is_connected(),
+        "supported_media": ["text", "photos", "stickers"],
+        "target_chats": target_chat_ids
+    }
+
+# Test Facebook connection at startup
+def test_facebook_connection():
+    """Test if we can connect to Facebook API"""
+    print("🔍 Testing Facebook connection...")
+    
+    # Test page access
+    url = f"https://graph.facebook.com/{page_id}?fields=id,name&access_token={page_access_token}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            page_data = response.json()
+            print(f"✅ Facebook page accessible: {page_data.get('name', 'Unknown')}")
+        else:
+            print(f"❌ Facebook page access failed: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"❌ Facebook connection test failed: {e}")
+
+if __name__ == "__main__":
+    # Test Facebook connection first
+    test_facebook_connection()
+    
+    # Start Telegram client in a separate thread
+    telegram_thread = Thread(target=run_telegram_client, daemon=True)
+    telegram_thread.start()
+    
+    # Start Flask server in main thread
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
