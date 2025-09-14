@@ -86,6 +86,48 @@ def post_with_retry(url, data=None, files=None, max_retries=3, timeout=30):
     print("🚨 All retries failed.")
     return None
 
+async def process_media(msg, caption, media_type):
+    """Process different types of media and upload to Facebook"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            file_path = await msg.download_media(file=os.path.join(tmp_dir, media_type))
+            if not file_path:
+                print("⚠️ Failed to download media.")
+                return
+
+            print(f"📂 Downloaded {media_type} to {file_path}")
+            
+            # Facebook supports different endpoints for different media
+            if media_type in ["photo", "sticker", "image"]:
+                url = f"https://graph.facebook.com/{page_id}/photos"
+                file_param = "source"
+            elif media_type == "video":
+                url = f"https://graph.facebook.com/{page_id}/videos"
+                file_param = "file"
+            else:
+                print(f"❌ Unsupported media type: {media_type}")
+                return
+            
+            with open(file_path, "rb") as f:
+                files = {file_param: f}
+                data = {"caption": caption, "access_token": page_access_token}
+                
+                # For videos, we need to use a longer timeout
+                timeout = 60 if media_type == "video" else 30
+                resp = post_with_retry(url, data=data, files=files, timeout=timeout)
+            
+            if resp and resp.status_code == 200:
+                fb_response = resp.json()
+                if "error" in fb_response:
+                    print(f"❌ Facebook API error: {fb_response['error']['message']}")
+                else:
+                    print(f"📤 {media_type.capitalize()} forwarded to Facebook.")
+            else:
+                print(f"❌ {media_type.capitalize()} forwarding failed.")
+                
+        except Exception as download_error:
+            print(f"❌ Failed to process {media_type}: {download_error}")
+
 @client.on(events.NewMessage(chats=target_chat_ids))
 async def handler(event):
     global last_post_time
@@ -103,35 +145,40 @@ async def handler(event):
     last_post_time = time.time()
 
     try:
+        # Check for various media types
+        media_type = None
+        
+        # Photos
         if getattr(msg, "photo", None):
-            print("🖼 Photo detected — downloading...")
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                try:
-                    file_path = await msg.download_media(file=os.path.join(tmp_dir, "photo"))
-                    if not file_path:
-                        print("⚠️ Failed to download media.")
-                        return
-
-                    print(f"📂 Downloaded to {file_path}")
-                    url = f"https://graph.facebook.com/{page_id}/photos"
-                    
-                    with open(file_path, "rb") as f:
-                        files = {"source": f}
-                        data = {"caption": message_text, "access_token": page_access_token}
-                        resp = post_with_retry(url, data=data, files=files)
-                    
-                    if resp and resp.status_code == 200:
-                        fb_response = resp.json()
-                        if "error" in fb_response:
-                            print(f"❌ Facebook API error: {fb_response['error']['message']}")
-                        else:
-                            print("📤 Photo forwarded to Facebook.")
-                    else:
-                        print("❌ Photo forwarding failed.")
-                        
-                except Exception as download_error:
-                    print(f"❌ Failed to process media: {download_error}")
-
+            media_type = "photo"
+            
+        # Stickers
+        elif getattr(msg, "sticker", None):
+            media_type = "sticker"
+            
+        # Videos
+        elif getattr(msg, "video", None):
+            media_type = "video"
+            
+        # Documents (could be images, PDFs, etc.)
+        elif getattr(msg, "document", None):
+            document = msg.document
+            if document:
+                # Check if document is an image
+                if document.mime_type and document.mime_type.startswith('image/'):
+                    media_type = "image"
+                # Check if document is a video
+                elif document.mime_type and document.mime_type.startswith('video/'):
+                    media_type = "video"
+                else:
+                    print(f"📄 Document detected but not processed (type: {document.mime_type})")
+        
+        # Process media if detected
+        if media_type:
+            print(f"📦 {media_type.capitalize()} detected — downloading...")
+            await process_media(msg, message_text, media_type)
+            
+        # Text only messages
         elif message_text.strip():
             url = f"https://graph.facebook.com/{page_id}/feed"
             data = {"message": message_text, "access_token": page_access_token}
@@ -142,7 +189,7 @@ async def handler(event):
                 print("❌ Text forwarding failed.")
                 
         else:
-            print("ℹ️ Ignored message (no text, no photo).")
+            print("ℹ️ Ignored message (no processable content).")
 
     except Exception as ex:
         print(f"Handler exception: {ex}")
@@ -157,6 +204,7 @@ def run_telegram_client():
         with client:
             print("✅ Telegram client started successfully")
             print("🤖 Bot is now running and listening for messages...")
+            print("📡 Supported media types: photos, stickers, videos, images")
             client.run_until_disconnected()
     except Exception as e:
         print(f"❌ Telegram client crashed: {e}")
@@ -177,7 +225,9 @@ def status():
     return {
         "status": "running",
         "service": "Telegram to Facebook Forwarder",
-        "telegram": "connected" if client.is_connected() else "disconnected"
+        "telegram": "connected" if client.is_connected() else "disconnected",
+        "supported_media": ["photos", "stickers", "videos", "images", "text"],
+        "target_chats": target_chat_ids
     }
 
 if __name__ == "__main__":
@@ -189,4 +239,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     print(f"🌐 Starting Flask server on port {port}")
     print(f"🔗 Web service will be available at: https://telegram-fb-forwarder.onrender.com")
+    print(f"📊 Check status at: https://telegram-fb-forwarder.onrender.com/status")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
