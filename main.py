@@ -46,7 +46,6 @@ print("✅ Environment variables loaded successfully")
 target_chat_ids = [
     -1002246802603,   # •NIA•💎PRIVATE CLUB💎•channel•
     -1001478882874,   # All Nigeria Latest News
-    -1002196614972    # 💸Trade with Nia💸
 ]
 
 # Create Telegram client
